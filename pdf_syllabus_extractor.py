@@ -58,8 +58,16 @@ def extract_unit_name_from_objective(objective_text):
 def extract_syllabus(pdf_path):
     units = []
     course_objectives = {}
+    course_outcomes = {}
+    subject_info = {}
+    resources = {
+        "text_books": [],
+        "reference_books": [],
+        "web_resources": []
+    }
     current_unit = None
-    state = "LOOKING_FOR_OBJECTIVES"
+    state = "LOOKING_FOR_SUBJECT_INFO"
+    current_resource_type = None
     
     roman_to_int = {'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6}
     
@@ -75,7 +83,32 @@ def extract_syllabus(pdf_path):
                     col0 = str(row[0]).strip() if row[0] else ""
                     col1 = str(row[1]).strip() if row[1] else ""
                     
-                    # First extract course objectives
+                    # Extract subject information (code, name, credits, marks)
+                    if state == "LOOKING_FOR_SUBJECT_INFO":
+                        # Look for subject code pattern
+                        if col0 and len(col0) < 10 and any(char.isdigit() for char in col0):
+                            # Extract marks information
+                            for i, cell in enumerate(row):
+                                cell_str = str(cell).strip() if cell else ""
+                                if cell_str.isdigit() and int(cell_str) in [25, 75, 100]:
+                                    if int(cell_str) == 25:
+                                        subject_info["cia_marks"] = 25
+                                    elif int(cell_str) == 75:
+                                        subject_info["external_marks"] = 75
+                                    elif int(cell_str) == 100:
+                                        subject_info["total_marks"] = 100
+                            
+                            # Extract credits
+                            for i, cell in enumerate(row):
+                                cell_str = str(cell).strip() if cell else ""
+                                if cell_str.isdigit() and int(cell_str) <= 10 and "credit" in str(row).lower():
+                                    subject_info["credits"] = int(cell_str)
+                        
+                        if "Course Objectives" in col0:
+                            state = "LOOKING_FOR_OBJECTIVES"
+                            continue
+                    
+                    # Extract course objectives
                     if state == "LOOKING_FOR_OBJECTIVES":
                         if col0.startswith("CO") and col0[2:].isdigit():
                             co_num = int(col0[2:])
@@ -137,8 +170,48 @@ def extract_syllabus(pdf_path):
                             if current_unit:
                                 units.append(current_unit)
                                 current_unit = None
-                            state = "DONE" # Or go back to looking if there are multiple syllabus sections
+                            state = "LOOKING_FOR_OUTCOMES"
+                            continue
+                    
+                    # Extract course outcomes
+                    if state == "LOOKING_FOR_OUTCOMES":
+                        if col0.startswith("CO") and col0[2:].isdigit():
+                            co_num = int(col0[2:])
+                            # Find the outcome text
+                            outcome_text = ""
+                            for cell in row[1:]:
+                                if cell and len(str(cell).strip()) > 20:
+                                    outcome_text = clean_text(str(cell))
+                                    break
+                            if outcome_text:
+                                course_outcomes[co_num] = outcome_text
+                        elif "Text Books" in col0 or "Text Books" in str(row):
+                            state = "LOOKING_FOR_RESOURCES"
+                            current_resource_type = "text_books"
+                            continue
+                    
+                    # Extract resources
+                    if state == "LOOKING_FOR_RESOURCES":
+                        # Check for section headers
+                        if "References Books" in col0 or "Reference Books" in col0:
+                            current_resource_type = "reference_books"
+                            continue
+                        elif "Web Resources" in col0:
+                            current_resource_type = "web_resources"
+                            continue
+                        elif "Methods of Evaluation" in col0 or "Methods of Assessment" in col0:
+                            state = "DONE"
                             break
+                        
+                        # Extract resource entries (numbered items)
+                        if col0 and (col0.isdigit() or col0.endswith('.')):
+                            resource_text = ""
+                            for cell in row[1:]:
+                                if cell and len(str(cell).strip()) > 10:
+                                    resource_text = clean_text(str(cell))
+                                    break
+                            if resource_text and current_resource_type:
+                                resources[current_resource_type].append(resource_text)
                 
                 if state == "DONE":
                     break
@@ -197,8 +270,14 @@ def extract_syllabus(pdf_path):
             "Unit_Name": unit["Unit_Name"],
             "Topics": topics
         })
-        
-    return final_units
+    
+    # Return comprehensive data
+    return {
+        "subject_info": subject_info,
+        "units": final_units,
+        "course_outcomes": course_outcomes,
+        "resources": resources
+    }
 
 def sanitize_filename(filename):
     """Remove file extension and clean up filename for use as a key."""
@@ -208,19 +287,17 @@ def sanitize_filename(filename):
     name = re.sub(r'[-\s]+', '_', name)
     return name
 
-def generate_json_for_pdf(units, pdf_name):
+def generate_json_for_pdf(syllabus_data, pdf_name):
     """Generate JSON structure for a single PDF."""
     clean_name = sanitize_filename(pdf_name)
     data = {
         clean_name: {
-            f"{clean_name}_Syllabus": {
-                "Units": units
-            }
+            f"{clean_name}_Syllabus": syllabus_data
         }
     }
     return data
 
-def generate_pdf(units, pdf_name, output_path):
+def generate_pdf(syllabus_data, pdf_name, output_path):
     """Generate PDF summary for a single syllabus."""
     doc = SimpleDocTemplate(output_path, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -232,6 +309,30 @@ def generate_pdf(units, pdf_name, output_path):
     clean_name = sanitize_filename(pdf_name).replace('_', ' ')
     story.append(Paragraph(f"{clean_name} Summary", title_style))
     story.append(Spacer(1, 12))
+    
+    # Subject Info
+    if syllabus_data.get("subject_info"):
+        info = syllabus_data["subject_info"]
+        if info:
+            story.append(Paragraph("Subject Information", styles['Heading2']))
+            info_text = []
+            if "credits" in info:
+                info_text.append(f"Credits: {info['credits']}")
+            if "total_marks" in info:
+                info_text.append(f"Total Marks: {info['total_marks']}")
+            if "cia_marks" in info:
+                info_text.append(f"CIA: {info['cia_marks']}")
+            if "external_marks" in info:
+                info_text.append(f"External: {info['external_marks']}")
+            if info_text:
+                story.append(Paragraph(" | ".join(info_text), styles['Normal']))
+                story.append(Spacer(1, 12))
+    
+    # Units
+    units = syllabus_data.get("units", [])
+    if units:
+        story.append(Paragraph("Course Units", styles['Heading2']))
+        story.append(Spacer(1, 6))
 
     for unit in units:
         # Unit Header
@@ -251,6 +352,38 @@ def generate_pdf(units, pdf_name, output_path):
             story.append(Paragraph(f"• {topic}", bullet_style))
         
         story.append(Spacer(1, 12))
+    
+    # Course Outcomes
+    outcomes = syllabus_data.get("course_outcomes", {})
+    if outcomes:
+        story.append(Paragraph("Course Outcomes", styles['Heading2']))
+        for co_num in sorted(outcomes.keys()):
+            story.append(Paragraph(f"<b>CO{co_num}:</b> {outcomes[co_num]}", styles['Normal']))
+            story.append(Spacer(1, 6))
+        story.append(Spacer(1, 12))
+    
+    # Resources
+    resources = syllabus_data.get("resources", {})
+    
+    if resources.get("text_books"):
+        story.append(Paragraph("Text Books", styles['Heading2']))
+        for i, book in enumerate(resources["text_books"], 1):
+            story.append(Paragraph(f"{i}. {book}", styles['Normal']))
+            story.append(Spacer(1, 3))
+        story.append(Spacer(1, 12))
+    
+    if resources.get("reference_books"):
+        story.append(Paragraph("Reference Books", styles['Heading2']))
+        for i, book in enumerate(resources["reference_books"], 1):
+            story.append(Paragraph(f"{i}. {book}", styles['Normal']))
+            story.append(Spacer(1, 3))
+        story.append(Spacer(1, 12))
+    
+    if resources.get("web_resources"):
+        story.append(Paragraph("Web Resources", styles['Heading2']))
+        for i, resource in enumerate(resources["web_resources"], 1):
+            story.append(Paragraph(f"{i}. {resource}", styles['Normal']))
+            story.append(Spacer(1, 3))
 
     doc.build(story)
 
@@ -276,18 +409,18 @@ def process_pdf_folder(input_folder, output_dir):
         print(f"\nProcessing: {pdf_file}")
         
         try:
-            units = extract_syllabus(pdf_path)
+            syllabus_data = extract_syllabus(pdf_path)
             
-            if units:
+            if syllabus_data and syllabus_data.get("units"):
                 # Generate individual PDF summary
                 pdf_name = os.path.splitext(pdf_file)[0]
                 pdf_out_path = os.path.join(output_dir, f"{pdf_name}_summary.pdf")
                 
                 print(f"  Generating PDF: {pdf_out_path}")
-                generate_pdf(units, pdf_file, pdf_out_path)
+                generate_pdf(syllabus_data, pdf_file, pdf_out_path)
                 
                 # Add to master JSON
-                pdf_json = generate_json_for_pdf(units, pdf_file)
+                pdf_json = generate_json_for_pdf(syllabus_data, pdf_file)
                 master_json.update(pdf_json)
                 
                 print(f"  ✓ Successfully processed {pdf_file}")
@@ -326,9 +459,9 @@ if __name__ == "__main__":
             print(f"Please create an 'input' folder with PDF files or ensure '{pdf_file}' exists.")
         else:
             print(f"Extracting syllabus from {pdf_file}...")
-            units = extract_syllabus(pdf_file)
+            syllabus_data = extract_syllabus(pdf_file)
             
-            if units:
+            if syllabus_data and syllabus_data.get("units"):
                 if not os.path.exists(output_dir):
                     os.makedirs(output_dir)
                 
@@ -337,12 +470,12 @@ if __name__ == "__main__":
                 pdf_out_path = os.path.join(output_dir, f"{pdf_name}_summary.pdf")
                 
                 print(f"Generating JSON: {json_path}")
-                json_data = generate_json_for_pdf(units, pdf_file)
+                json_data = generate_json_for_pdf(syllabus_data, pdf_file)
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(json_data, f, indent=2)
                 
                 print(f"Generating PDF: {pdf_out_path}")
-                generate_pdf(units, pdf_file, pdf_out_path)
+                generate_pdf(syllabus_data, pdf_file, pdf_out_path)
                 
                 print("Done!")
             else:
